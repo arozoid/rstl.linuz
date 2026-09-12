@@ -1,4 +1,4 @@
-name: Build CachyOS BORE Minimal Kernel
+name: Build rstl-linuz Kernel
 
 on:
   push:
@@ -11,6 +11,10 @@ on:
         description: 'CachyOS release tag (e.g., 7.2.4-1)'
         required: false
         default: '7.2.4-1'
+      firmware_set:
+        description: 'firmware collection (fdrv|blend|vdpup|modern)'
+        required: false
+        default: 'fdrv'
 
 jobs:
   build:
@@ -29,20 +33,24 @@ jobs:
           sudo apt-get install -y \
             bc binutils flex bison libssl-dev libelf-dev \
             cpio pahole dwarves python3 libncurses-dev \
-            zstd lz4 xz-utils git
+            zstd lz4 xz-utils squashfs-tools git
 
-      - name: Determine release tag
+      - name: Determine release tag and firmware set
         id: tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            TAG="build-${{ github.event.inputs.kernel_version || '7.2.4-1' }}"
+            FS="${{ github.event.inputs.firmware_set || 'fdrv' }}"
+            TAG="build-${{ github.event.inputs.kernel_version || '7.2.4-1' }}-${FS}"
           elif [ "${{ github.event_name }}" = "schedule" ]; then
+            FS="fdrv"
             TAG="daily-$(date -u +%Y.%m.%d)"
           else
+            FS="fdrv"
             TAG="push-$(date -u +%Y.%m.%d-%H%M)"
           fi
           echo "TAG=${TAG}" >> "$GITHUB_ENV"
-          echo "Release tag: ${TAG}"
+          echo "FW_SET=${FS}" >> "$GITHUB_ENV"
+          echo "Release tag: ${TAG} (firmware: ${FS})"
 
       - name: Download kernel source
         env:
@@ -65,12 +73,68 @@ jobs:
           bash ../config/minimize.sh
           yes "" | make olddefconfig
 
+      - name: Check for reusable previous build
+        id: reuse
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          cd kernel
+          KVER=$(make -s kernelrelease) || { cd ..; echo "REUSE=0" >> "$GITHUB_OUTPUT"; exit 0; }
+          cd ..
+          echo "${KVER}" > kernel-version
+          echo "Current kernel version: ${KVER}"
+
+          SHA=$(sha256sum kernel/.config | cut -d' ' -f1)
+          echo "Current config sha256:  ${SHA}"
+
+          LATEST=$(gh api "repos/${GITHUB_REPOSITORY}/releases/latest" \
+            --jq '.tag_name' 2>/dev/null || true)
+          if [ -z "${LATEST}" ]; then
+            echo "No previous release — full build."
+            echo "REUSE=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          echo "Latest release: ${LATEST}"
+
+          rm -rf /tmp/prev && mkdir -p /tmp/prev
+          if ! gh release download "${LATEST}" --pattern kernel-version --dir /tmp/prev --clobber; then
+            echo "REUSE=0" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          if ! gh release download "${LATEST}" --pattern config --dir /tmp/prev --clobber; then
+            echo "REUSE=0" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+
+          PREV_KVER=$(cat /tmp/prev/kernel-version)
+          PREV_SHA=$(sha256sum /tmp/prev/config | cut -d' ' -f1)
+          echo "Prev kernel version:    ${PREV_KVER}"
+          echo "Prev config sha256:     ${PREV_SHA}"
+          echo "Repo commit:            ${GITHUB_SHA}"
+
+          if [ "${PREV_KVER}" != "${KVER}" ] || [ "${PREV_SHA}" != "${SHA}" ]; then
+            echo "Kernel version or config differs — full build."
+            echo "REUSE=0" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "Same kernel version and config — reusing previous build."
+          if ! gh release download "${LATEST}" \
+                --pattern "rstl-linuz-${LATEST}.tar.zst" \
+                --dir /tmp/prev --clobber; then
+            echo "REUSE=0" >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          mkdir -p stage
+          tar --zstd -xf "/tmp/prev/rstl-linuz-${LATEST}.tar.zst" \
+            -C stage ./boot ./config ./lib/modules
+          echo "REUSE=1" >> "$GITHUB_OUTPUT"
+
       - name: Build kernel
+        if: steps.reuse.outputs.REUSE != '1'
         run: |
           cd kernel
           make -j$(nproc) bzImage modules 2>&1 | tee ../build.log
 
       - name: Package kernel and modules
+        if: steps.reuse.outputs.REUSE != '1'
         run: |
           cd kernel
           KVER=$(make -s kernelrelease)
@@ -84,26 +148,28 @@ jobs:
                  "../stage/lib/modules/${KVER}/source"
           cp .config ../stage/config
 
-      - name: Download linux-firmware
+      - name: Fetch firmware
         run: |
-          if timeout 600 git clone --depth 1 \
-            https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git \
-            /tmp/firmware; then
+          bash config/fetch-firmware.sh "${FW_SET}" stage || {
+            echo "::warning::firmware fetch failed, continuing empty"
             mkdir -p stage/lib/firmware
-            cp -a /tmp/firmware/* stage/lib/firmware/
-            rm -rf /tmp/firmware
-          else
-            echo "::warning::Firmware download failed, continuing without"
-            mkdir -p stage/lib/firmware
-          fi
+          }
 
-      - name: Create release tarball
+      - name: Create release tarballs (3 compression levels)
         run: |
-          TARBALL="cachyos-bore-minimal-${TAG}.tar.zst"
-          tar -C stage -cf - . | zstd -19 -T0 -o "${TARBALL}"
-          ls -lh "${TARBALL}"
           KVER=$(cat kernel-version)
+          TARBALL="rstl-linuz-${TAG}.tar.zst"
+          TARBALL_L3="rstl-linuz-${TAG}-l3.tar.zst"
+          TARBALL_LONG="rstl-linuz-${TAG}-long.tar.zst"
+          tar -C stage -cf "rstl-linuz-${TAG}.tar" .
+          zstd -3 -T0 -f -o "${TARBALL_L3}"   "rstl-linuz-${TAG}.tar"
+          zstd -19 -T0 -f -o "${TARBALL}"     "rstl-linuz-${TAG}.tar"
+          zstd --long=28 -19 -T0 -f -o "${TARBALL_LONG}" "rstl-linuz-${TAG}.tar"
+          rm -f "rstl-linuz-${TAG}.tar"
+          ls -lh "${TARBALL}" "${TARBALL_L3}" "${TARBALL_LONG}"
           echo "TARBALL=${TARBALL}" >> "$GITHUB_ENV"
+          echo "TARBALL_L3=${TARBALL_L3}" >> "$GITHUB_ENV"
+          echo "TARBALL_LONG=${TARBALL_LONG}" >> "$GITHUB_ENV"
           echo "KVER=${KVER}" >> "$GITHUB_ENV"
 
       - name: Create GitHub Release
@@ -112,6 +178,7 @@ jobs:
         run: |
           gh release delete "${TAG}" --yes --cleanup-tag 2>/dev/null || true
           gh release create "${TAG}" \
-            --title "CachyOS BORE Minimal ${KVER} (${TAG})" \
+            --title "rstl-linuz ${KVER} (${TAG})" \
             --generate-notes \
-            "${TARBALL}"
+            "${TARBALL}" "${TARBALL_L3}" "${TARBALL_LONG}" \
+            stage/config kernel-version
