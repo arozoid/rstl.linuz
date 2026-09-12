@@ -28,7 +28,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y \
             bc binutils flex bison libssl-dev libelf-dev \
-            cpio pahole python3 libncurses-dev dwarfutils \
+            cpio pahole dwarves python3 libncurses-dev \
             zstd lz4 xz-utils git
 
       - name: Determine release tag
