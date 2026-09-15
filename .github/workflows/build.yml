@@ -155,6 +155,17 @@ jobs:
             mkdir -p stage/lib/firmware
           }
 
+      - name: Trim firmware to shipped kernel modules
+        run: |
+          MODULES_DIR=$(ls -d stage/lib/modules/*/ 2>/dev/null | head -1)
+          if [ -z "$MODULES_DIR" ]; then
+            echo "No module tree found in stage - skipping firmware trim"
+          else
+            bash config/firmware-trim.sh stage/lib/firmware \
+              --modules "${MODULES_DIR%/}" || \
+              echo "::warning::firmware trim failed"
+          fi
+
       - name: Create release tarballs (3 compression levels)
         run: |
           KVER=$(cat kernel-version)

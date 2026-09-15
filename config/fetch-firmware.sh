@@ -63,9 +63,13 @@ OVERLAY=(
         rtw88 rtw89 rtlwifi rtl_bt
         ath10k ath11k ath12k ath6k ar3k qca
         mwifiex
+        mrvl           # mwifiex_sdio/mwifiex_pcie firmware
+        nvidia         # nouveau GPU firmware
+        sof            # Sound Open Firmware (Intel DSP audio)
         mediatek brcm cypress
         rtl_nic e100 e1000
         rt73.bin rt2870.bin
+        regulatory.db regulatory.db.p7s  # wireless regdb (kernel loads directly)
     )
     for spec in "${OVERLAY[@]}"; do
         n=0
