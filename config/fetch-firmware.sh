@@ -56,21 +56,30 @@ blend)
     git clone --depth 1 \
         https://git.kernel.org/pub/scm/linux/kernel/git/firmware/linux-firmware.git \
         /tmp/lfw
-    OVERLAY=(
+OVERLAY=(
         amdgpu amdnpu radeon i915
-        intel/iwlwifi iwlwifi
+        intel/iwlwifi intel/ibt-*
         sof
-        rtw88 rtw89 rtlwifi rtl_bt rtl_nic
-        ath10k ath11k ath12k qca ath3k
+        rtw88 rtw89 rtlwifi rtl_bt
+        ath10k ath11k ath12k ath6k ar3k qca
+        mwifiex
         mediatek brcm cypress
-        bnx2x
+        rtl_nic e100 e1000
+        rt73.bin rt2870.bin
     )
-    for d in "${OVERLAY[@]}"; do
-        if [ -d "/tmp/lfw/$d" ]; then
-            mkdir -p "$FW/$(dirname "$d")"
-            cp -a "/tmp/lfw/$d" "$FW/$d"
+    for spec in "${OVERLAY[@]}"; do
+        n=0
+        for f in /tmp/lfw/$spec; do
+            [ -e "$f" ] || continue
+            rel=${f#/tmp/lfw/}
+            mkdir -p "$FW/$(dirname "$rel")"
+            cp -a "$f" "$FW/$rel"
+            n=$((n+1))
+        done
+        if [ "$n" -gt 0 ]; then
+            echo "    copied ${spec} (${n} item(s))"
         else
-            echo "    (skip $d - not in linux-firmware)"
+            echo "    (skip ${spec} - not in linux-firmware)"
         fi
     done
     ;;

@@ -224,6 +224,24 @@ cfg -d RUST
 # SMB server (ksmbd)
 disable SMB_SERVER
 
+# ── Hard trims (safe for modern desktop/laptop) ───────────────────────
+
+echo ">>> Nuking: dead-end / legacy subsystems"
+
+# Legacy OSS ALSA emulation (PulseAudio/PipeWire don't need it)
+for oss in SND_OSSEMUL SND_MIXER_OSS SND_PCM_OSS; do
+    disable "$oss"
+done
+
+# Legacy BSD pty, ancient WAN cards, Sony Memory Stick
+disable LEGACY_PTYS
+disable WAN
+disable MEMSTICK
+
+# Server-grade NICs (bnx2x/mlx5) - not present on consumer desktops/laptops
+disable BNX2X
+disable MLX5_CORE
+
 # ── Obscure filesystems ──────────────────────────────────────────────
 
 echo ">>> Nuking: obscure filesystems"
@@ -252,62 +270,83 @@ for fs in \
     disable "$fs"
 done
 
-# ── Make sure critical options stay ON ────────────────────────────────
+# ── Make sure critical options stay ON / OFF correctly ───────────────
 
 echo ">>> Verifying essential drivers"
 
-# Filesystems
+# ── Boot-essential =y: must be in the kernel image ──────────────────
+# No initramfs is shipped, so anything needed to reach the root filesystem
+# has to be built in: root filesystems, loop (for the live squashfs), and
+# the storage + USB controllers that back the root drive. Everything else is
+# a module (=m) that udev loads once userspace is up.
+
 cfg -e EXT4_FS
 cfg -e BTRFS_FS
-cfg -e XFS_FS
-cfg -e F2FS_FS
 cfg -e SQUASHFS
 cfg -e OVERLAY_FS
+cfg -e BLK_DEV_LOOP
 
-# Storage
 cfg -e BLK_DEV_NVME
 cfg -e SATA_AHCI
 cfg -e USB_STORAGE
 cfg -e UAS
 
-# DRM
-cfg -e DRM_I915
-cfg -e DRM_AMDGPU
-cfg -e DRM_NOUVEAU
-
-# USB / Bluetooth / Webcams
 cfg -e USB
-cfg -e USB_VIDEO_CLASS
-cfg -e MEDIA_CAMERA_SUPPORT
-cfg -e BT
+cfg -e USB_XHCI_HCD
+cfg -e USB_EHCI_HCD
+cfg -e USB_OHCI_HCD
+cfg -e INPUT
 
-# WiFi
-cfg -e IWLWIFI
-cfg -e RTW88
-cfg -e RTW89
-cfg -e MT76
-cfg -e ATH
-
-# Ethernet (common)
-cfg -e E1000E
-cfg -e IGB
-cfg -e IGC
-cfg -e R8169
-cfg -e BNX2X
-cfg -e MLX5_CORE
-
-# KVM / Virtualization
-cfg -e KVM
-cfg -e KVM_INTEL
-cfg -e KVM_AMD
-cfg -e VIRTIO
-cfg -e VIRTIO_PCI
-cfg -e VFIO
-
-# Microcode
+# Microcode must be applied before any module exists
 cfg -e MICROCODE
 
-# Sound
-cfg -e SND
+# Bool subsystem gates (not drivers): keep the feature, load drivers as =m
+cfg -e MMC
+cfg -e USB_NET_DRIVERS
+cfg -e USB_SERIAL
+cfg -e USB4
+cfg -e MEDIA_CAMERA_SUPPORT
+
+# ── Everything else =m (loadable after boot) ─────────────────────────
+cm() { cfg -m "$@"; }
+
+# Alternate root filesystems (not usually the boot root)
+cm XFS_FS F2FS_FS
+
+# GPU (built in only if you need early-kernel console on a specific GPU)
+cm DRM_I915 DRM_AMDGPU DRM_NOUVEAU
+
+# Input / HID peripherals (keyboard, mouse, touchscreens, webcams)
+cm HID USB_HID HID_GENERIC HID_MULTITOUCH I2C_HID USB_VIDEO_CLASS
+
+# USB gadgets: ethernet dongles, 3D printers / Arduinos, printers, card
+# readers, SD/MMC slots, USB4 docks
+cm R8152 AX88179_178A
+cm USB_SERIAL_ACM USB_SERIAL_CH341 USB_SERIAL_CP210X USB_SERIAL_FTDI_SIO USB_SERIAL_PL2303
+cm USB_PRINTER
+cm MISC_RTSX_PCI MISC_RTSX_USB MMC_SDHCI MMC_SDHCI_PCI MMC_SDHCI_ACPI
+
+# Bluetooth (USB + UART controllers and PCI/ACPI devices)
+cm BT BT_HCIBTUSB BT_HCIUART BT_ATH3K
+
+# WiFi
+cm IWLWIFI RTW88 RTW89 MT76 ATH
+cm ATH9K ATH10K ATH11K ATH12K
+
+# Cheap USB WiFi dongles
+cm RT2500USB RT73USB RT2800USB RT8XXXU
+
+# Legacy Realtek PCI/PCIe + Broadcom/Marvell WiFi
+cm RTL8188EE RTL8192CE RTL8192CU RTL8723AE RTL8723BE RTL8821AE RTL8822BE
+cm BRCMSMAC MWIFIEX MWIFIEX_SDIO MWIFIEX_PCIE
+
+# Ethernet (consumer/workstation + USB ethernet dongles)
+cm E1000E E100 IGB IGC R8169 TG3 ALX
+
+# KVM / Virtualization
+cm KVM KVM_INTEL KVM_AMD VIRTIO VIRTIO_PCI VFIO
+
+# Sound (ALSA core as a module; userspace loads codecs)
+cm SND
 
 echo ">>> Done modifying config. Run 'make olddefconfig' next."

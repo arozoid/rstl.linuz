@@ -14,7 +14,7 @@ on:
       firmware_set:
         description: 'firmware collection (fdrv|blend|vdpup|modern)'
         required: false
-        default: 'fdrv'
+        default: 'blend'
 
 jobs:
   build:
@@ -39,13 +39,13 @@ jobs:
         id: tag
         run: |
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            FS="${{ github.event.inputs.firmware_set || 'fdrv' }}"
+            FS="${{ github.event.inputs.firmware_set || 'blend' }}"
             TAG="build-${{ github.event.inputs.kernel_version || '7.2.4-1' }}-${FS}"
           elif [ "${{ github.event_name }}" = "schedule" ]; then
-            FS="fdrv"
+            FS="blend"
             TAG="daily-$(date -u +%Y.%m.%d)"
           else
-            FS="fdrv"
+            FS="blend"
             TAG="push-$(date -u +%Y.%m.%d-%H%M)"
           fi
           echo "TAG=${TAG}" >> "$GITHUB_ENV"
