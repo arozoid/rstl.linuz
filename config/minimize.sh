@@ -308,7 +308,11 @@ cfg -e USB4
 cfg -e MEDIA_CAMERA_SUPPORT
 
 # ── Everything else =m (loadable after boot) ─────────────────────────
-cm() { cfg -m "$@"; }
+# scripts/config accepts exactly one symbol per invocation, so iterate.
+cm() {
+    local sym
+    for sym in "$@"; do cfg -m "$sym"; done
+}
 
 # Alternate root filesystems (not usually the boot root)
 cm XFS_FS F2FS_FS
