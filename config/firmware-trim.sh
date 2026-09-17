@@ -47,7 +47,13 @@ done
     echo "usage: firmware-trim.sh <firmware-dir> [--modules <dir>] [--dry-run]" >&2
     exit 1
 }
+# Resolve paths to absolute BEFORE cd'ing into the firmware tree, since the
+# modules dir is usually given relative to the release root.
+case "$FW" in /*) ;; *) FW="$(pwd -P)/$FW" ;; esac
 [ -d "$FW" ] || { echo "not a directory: $FW" >&2; exit 1; }
+if [ -n "$MODULES" ]; then
+    case "$MODULES" in /*) ;; *) MODULES="$(pwd -P)/$MODULES" ;; esac
+fi
 cd "$FW"
 
 if [ ! -f WHENCE ]; then
@@ -136,57 +142,57 @@ for f in *; do
     esac
 done
 
-if [ -n "$MODULES" ] && command -v modinfo >/dev/null 2>&1; then
-    if [ ! -d "$MODULES" ]; then
-        echo "WARNING: --modules path not found ($MODULES), skipping modinfo prune"
+if [ -n "$MODULES" ]; then
+    command -v modinfo >/dev/null 2>&1 || {
+        echo "ERROR: --modules given but modinfo not found" >&2; exit 1; }
+    [ -d "$MODULES" ] || {
+        echo "ERROR: --modules path not found: $MODULES" >&2; exit 1; }
+    echo ">>> Collecting firmware references from modules: $MODULES"
+    needed=$(mktemp)
+    find "$MODULES" \( -name '*.ko' -o -name '*.ko.zst' -o -name '*.ko.xz' \
+        -o -name '*.ko.gz' \) -print0 2>/dev/null |
+        xargs -0 -P"$(nproc 2>/dev/null || echo 8)" -n1 \
+            modinfo -F firmware 2>/dev/null |
+        while IFS= read -r f; do basename "$f"; done |
+        sort -u > "$needed"
+    total=$(wc -l < "$needed")
+    echo "    ${total} distinct firmware files requested"
+
+    is_whole() { # $1 = top-level dir
+        local d=$1
+        for k in "${KEEP_WHOLE[@]}"; do [ "$d" = "$k" ] && return 0; done
+        return 1
+    }
+
+    rm_count=0
+    rm_bytes=0
+    while IFS= read -r -d '' p; do
+        rel=${p#./}
+        base=${p##*/}
+        top=${rel%%/*}
+        case "$base" in
+            WHENCE|GIT-INFO|README*)  continue ;;
+            LICENCE*|LICENSE*|COPYING|GPL*) continue ;;
+            regulatory.db|regulatory.db.p7s) continue ;;
+        esac
+        [ "$top" = intel ] && [[ "$rel" =~ ^intel/ibt- ]] && continue
+        is_whole "$top" && continue
+        grep -qxF "$base" "$needed" && continue
+        rm_count=$((rm_count+1))
+        rm_bytes=$((rm_bytes + $(stat -c%s "$p" 2>/dev/null || echo 0)))
+        [ "$DRY" = 1 ] || rm -f "$p"
+    done < <(find . -type f -print0)
+
+    find . -depth -type d -empty -delete 2>/dev/null || true
+
+    if [ "$DRY" = 1 ]; then
+        echo ">>> dry-run: would delete ${rm_count} files (~$((rm_bytes/1048576)) MiB)"
     else
-        echo ">>> Collecting firmware references from modules: $MODULES"
-        needed=$(mktemp)
-        find "$MODULES" \( -name '*.ko' -o -name '*.ko.zst' -o -name '*.ko.xz' \
-            -o -name '*.ko.gz' \) -print0 2>/dev/null |
-            xargs -0 -P"$(nproc 2>/dev/null || echo 8)" -n1 \
-                modinfo -F firmware 2>/dev/null |
-            while IFS= read -r f; do basename "$f"; done |
-            sort -u > "$needed"
-        total=$(wc -l < "$needed")
-        echo "    ${total} distinct firmware files requested"
-
-        is_whole() { # $1 = top-level dir
-            local d=$1
-            for k in "${KEEP_WHOLE[@]}"; do [ "$d" = "$k" ] && return 0; done
-            return 1
-        }
-
-        rm_count=0
-        rm_bytes=0
-        while IFS= read -r -d '' p; do
-            rel=${p#./}
-            base=${p##*/}
-            top=${rel%%/*}
-            case "$base" in
-                WHENCE|GIT-INFO|README*)  continue ;;
-                LICENCE*|LICENSE*|COPYING|GPL*) continue ;;
-                regulatory.db|regulatory.db.p7s) continue ;;
-            esac
-            [ "$top" = intel ] && [[ "$rel" =~ ^intel/ibt- ]] && continue
-            is_whole "$top" && continue
-            grep -qxF "$base" "$needed" && continue
-            rm_count=$((rm_count+1))
-            rm_bytes=$((rm_bytes + $(stat -c%s "$p" 2>/dev/null || echo 0)))
-            [ "$DRY" = 1 ] || rm -f "$p"
-        done < <(find . -type f -print0)
-
-        find . -depth -type d -empty -delete 2>/dev/null || true
-
-        if [ "$DRY" = 1 ]; then
-            echo ">>> dry-run: would delete ${rm_count} files (~$((rm_bytes/1048576)) MiB)"
-        else
-            echo ">>> deleted ${rm_count} firmware files (~$((rm_bytes/1048576)) MiB)"
-        fi
-        rm -f "$needed"
+        echo ">>> deleted ${rm_count} firmware files (~$((rm_bytes/1048576)) MiB)"
     fi
+    rm -f "$needed"
 else
-    echo ">>> modinfo unavailable or --modules not given - skipping requested-fw prune"
+    echo ">>> --modules not given - skipping requested-fw prune"
 fi
 
 echo ">>> firmware size after:  $(du -sh . | cut -f1)"

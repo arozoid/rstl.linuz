@@ -155,15 +155,25 @@ jobs:
             mkdir -p stage/lib/firmware
           }
 
+      - name: Trim release modules (static keep)
+        run: |
+          KVER=$(cat kernel-version)
+          if [ ! -d "stage/lib/modules/${KVER}" ]; then
+            echo "No module tree for ${KVER} - skipping module trim"
+          else
+            bash config/live-trim.sh --dir stage --static --kver "${KVER}" --apply
+          fi
+
       - name: Trim firmware to shipped kernel modules
         run: |
-          MODULES_DIR=$(ls -d stage/lib/modules/*/ 2>/dev/null | head -1)
-          if [ -z "$MODULES_DIR" ]; then
+          KVER=$(cat kernel-version)
+          MODULES_DIR="${{ github.workspace }}/stage/lib/modules/${KVER}"
+          if [ ! -d "${MODULES_DIR}" ]; then
             echo "No module tree found in stage - skipping firmware trim"
           else
-            bash config/firmware-trim.sh stage/lib/firmware \
-              --modules "${MODULES_DIR%/}" || \
-              echo "::warning::firmware trim failed"
+            bash config/firmware-trim.sh \
+              "${{ github.workspace }}/stage/lib/firmware" \
+              --modules "${MODULES_DIR}"
           fi
 
       - name: Create release tarballs (3 compression levels)

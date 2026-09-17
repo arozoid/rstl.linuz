@@ -42,6 +42,9 @@
 #   --sfs-comp <c> mksquashfs compression for the re-packed sfs (default zstd)
 #   --kver <ver>   version under lib/modules (default: running kernel)
 #   --history <db> merge previously recorded modules; appended on --apply
+#   --static      config-driven generic keep (minimize.sh set + dongles),
+#                 NO machine inputs (lsmod/modalias). For staged release
+#                 trees, not live boxes.
 
 set -euo pipefail
 
@@ -55,6 +58,7 @@ HISTORY=""
 KVER="$(uname -r)"
 EXTRACT=""
 FLOOR=150
+STATIC=0
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -67,6 +71,7 @@ while [[ $# -gt 0 ]]; do
         --kver)      KVER="${2:?--kver needs an argument}"; shift ;;
         --history)   HISTORY="${2:?--history needs an argument}"; shift ;;
         --floor)     FLOOR="${2:?--floor needs an argument}"; shift ;;
+        --static)    STATIC=1 ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
     shift
@@ -112,6 +117,7 @@ echo ">>> live-trim tree: $MTREE"
 # ── seed keep-set ─────────────────────────────────────────────────────
 
 declare -A seen=()
+declare -A keep_rel=()
 queue=()
 
 enqueue() {
@@ -120,50 +126,6 @@ enqueue() {
     seen["$1"]=1
     queue+=("$1")
 }
-
-name_to_rel() {
-    # module names come from /proc/modules and modprobe -R with underscores,
-    # but kernel module FILES spell many of them with dashes (snd_usb_audio ->
-    # snd-usb-audio.ko, snd_seq_dummy -> snd-seq-dummy.ko). Match both.
-    local n="$1" pat
-    pat="$(printf '%s\n' "$n" | sed 's/_/[-_]/g')"
-    awk -F: -v p="$pat" '$1 ~ "^kernel/.*/" p "\\.ko" {print $1}' "$DEPS"
-}
-
-# tracked history
-if [[ -n "$HISTORY" && -f "$HISTORY" ]]; then
-    while IFS= read -r m; do enqueue "N:$m"; done < "$HISTORY"
-fi
-
-# modules loaded right now
-while IFS=' ' read -r m _; do enqueue "N:$m"; done < /proc/modules 2>/dev/null || true
-
-# every device's modalias on the live box (proper glob matching via kmod)
-shopt -s nullglob
-for mf in /sys/bus/*/devices/*/modalias; do
-    [[ -r "$mf" ]] || continue
-    m="$(cat "$mf" 2>/dev/null || true)"
-    [[ -n "$m" ]] || continue
-    for mod in $(modprobe -R "$m" 2>/dev/null || true); do
-        enqueue "N:$mod"
-    done
-done
-
-# names -> module files -> dependencies (closure)
-declare -A keep_rel=()
-while [[ ${#queue[@]} -gt 0 ]]; do
-    item="${queue[0]}"
-    queue=("${queue[@]:1}")
-    if [[ "$item" == N:* ]]; then
-        for rel in $(name_to_rel "${item#N:}"); do enqueue "R:$rel"; done
-    else
-        rel="${item#R:}"
-        keep_rel["$rel"]=1
-        for d in $(awk -F: -v r="$rel" '$1==r {print $2}' "$DEPS"); do
-            for dd in $d; do enqueue "R:$dd"; done
-        done
-    fi
-done
 
 # ── always-keep lists ─────────────────────────────────────────────────
 
@@ -195,6 +157,17 @@ KEEP_EXTRA=(
     '^hid[-_](apple|lenovo|logitech[a-z0-9_]*)'                        # input hw
 )
 
+# basename regexes: the rest of minimize.sh's generic =m contract - GPUs, Intel
+# WiFi, wired NICs, and KVM/VIRTIO/VFIO. Kept by --static so the release still
+# covers "most people" hardware instead of only this box's lsmod/modalias.
+KEEP_RELEASE=(
+    '^(i915|amdgpu|radeon|nouveau|qxl)'                                # GPU accel
+    '^(iwlwifi|iwlmei)'                                                # Intel WiFi
+    '^(e1000e|e1000|e100|igb|igc|r8169|tg3|alx)'                       # wired NICs
+    '^(r8152|ax88179_178a|usblp)'                                      # USB NICs + printer
+    '^(kvm|kvm_intel|kvm_amd|irqbypass|virtio[a-z0-9_]*|vfio[a-z0-9_]*)'
+)
+
 should_keep() {
     local rel="$1" base
     [[ -n "${keep_rel[$rel]:-}" ]] && return 0
@@ -202,11 +175,66 @@ should_keep() {
         [[ "$rel" == "$p"* ]] && return 0
     done
     base="$(basename "$rel")"
-    for p in "${KEEP_BASE[@]}" "${KEEP_EXTRA[@]}"; do
+    for p in "${KEEP_BASE[@]}" "${KEEP_EXTRA[@]}" "${KEEP_RELEASE[@]}"; do
         [[ "$base" =~ $p\. ]] && return 0
     done
     return 1
 }
+
+name_to_rel() {
+    # module names come from /proc/modules and modprobe -R with underscores,
+    # but kernel module FILES spell many of them with dashes (snd_usb_audio ->
+    # snd-usb-audio.ko, snd_seq_dummy -> snd-seq-dummy.ko). Match both.
+    local n="$1" pat
+    pat="$(printf '%s\n' "$n" | sed 's/_/[-_]/g')"
+    awk -F: -v p="$pat" '$1 ~ "^kernel/.*/" p "\\.ko" {print $1}' "$DEPS"
+}
+
+# tracked history
+if [[ -n "$HISTORY" && -f "$HISTORY" ]]; then
+    while IFS= read -r m; do enqueue "N:$m"; done < "$HISTORY"
+fi
+
+if [[ "$STATIC" == 1 ]]; then
+    # generic release trim: no live lsmod/modalias. Keep every module whose
+    # basename matches the release keep rules, plus dependency closure, so
+    # the shipped set is "most people" wide but not the full modules tree.
+    echo ">>> static keep (no machine inputs)"
+    while IFS= read -r -d '' rel; do
+        rel="${rel#$MTREE/}"
+        if should_keep "$rel"; then enqueue "R:$rel"; fi
+    done < <(find "$MTREE" \( -name '*.ko' -o -name '*.ko.zst' -o -name '*.ko.xz' -o -name '*.ko.gz' \) -print0)
+else
+    # modules loaded right now
+    while IFS=' ' read -r m _; do enqueue "N:$m"; done < /proc/modules 2>/dev/null || true
+
+    # every device's modalias on the live box (proper glob matching via kmod)
+    shopt -s nullglob
+    for mf in /sys/bus/*/devices/*/modalias; do
+        [[ -r "$mf" ]] || continue
+        m="$(cat "$mf" 2>/dev/null || true)"
+        [[ -n "$m" ]] || continue
+        for mod in $(modprobe -R "$m" 2>/dev/null || true); do
+            enqueue "N:$mod"
+        done
+    done
+fi
+
+# names -> module files -> dependencies (closure)
+declare -A keep_rel=()
+while [[ ${#queue[@]} -gt 0 ]]; do
+    item="${queue[0]}"
+    queue=("${queue[@]:1}")
+    if [[ "$item" == N:* ]]; then
+        for rel in $(name_to_rel "${item#N:}"); do enqueue "R:$rel"; done
+    else
+        rel="${item#R:}"
+        keep_rel["$rel"]=1
+        for d in $(awk -F: -v r="$rel" '$1==r {print $2}' "$DEPS"); do
+            for dd in $d; do enqueue "R:$dd"; done
+        done
+    fi
+done
 
 # ── phase 1: modules ──────────────────────────────────────────────────
 
