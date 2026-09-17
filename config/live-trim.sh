@@ -54,6 +54,7 @@ FORCE=0
 HISTORY=""
 KVER="$(uname -r)"
 EXTRACT=""
+FLOOR=150
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -65,6 +66,7 @@ while [[ $# -gt 0 ]]; do
         --sfs-comp)  SFS_COMP="${2:?--sfs-comp needs an argument}"; shift ;;
         --kver)      KVER="${2:?--kver needs an argument}"; shift ;;
         --history)   HISTORY="${2:?--history needs an argument}"; shift ;;
+        --floor)     FLOOR="${2:?--floor needs an argument}"; shift ;;
         *) echo "unknown option: $1" >&2; exit 1 ;;
     esac
     shift
@@ -120,7 +122,12 @@ enqueue() {
 }
 
 name_to_rel() {
-    awk -F: -v n="$1" '$1 ~ "^kernel/.*/" n "\\.ko" {print $1}' "$DEPS"
+    # module names come from /proc/modules and modprobe -R with underscores,
+    # but kernel module FILES spell many of them with dashes (snd_usb_audio ->
+    # snd-usb-audio.ko, snd_seq_dummy -> snd-seq-dummy.ko). Match both.
+    local n="$1" pat
+    pat="$(printf '%s\n' "$n" | sed 's/_/[-_]/g')"
+    awk -F: -v p="$pat" '$1 ~ "^kernel/.*/" p "\\.ko" {print $1}' "$DEPS"
 }
 
 # tracked history
@@ -204,17 +211,33 @@ should_keep() {
 # ── phase 1: modules ──────────────────────────────────────────────────
 
 mapfile -d '' KO_LIST < <(find "$MTREE" \( -name '*.ko' -o -name '*.ko.zst' -o -name '*.ko.xz' -o -name '*.ko.gz' \) -print0 | sort -z)
-n_ko=0; n_del=0; n_del_bytes=0
+n_ko=${#KO_LIST[@]}
+declare -A del_sz=()
 for rel in "${KO_LIST[@]}"; do
     rel="${rel#$MTREE/}"
-    n_ko=$((n_ko+1))
     if should_keep "$rel"; then continue; fi
-    n_del=$((n_del+1))
-    sz=$(stat -c%s "$MTREE/$rel" 2>/dev/null || echo 0)
-    n_del_bytes=$((n_del_bytes + sz))
-    [[ "$APPLY" == 1 ]] && rm -f "$MTREE/$rel"
+    del_sz["$rel"]=$(stat -c%s "$MTREE/$rel" 2>/dev/null || echo 0)
 done
-echo ">>> modules: ${n_ko} total, keeping $((n_ko-n_del)), deleting ${n_del} ($((n_del_bytes/1024)) KiB)"
+n_del=${#del_sz[@]}
+kept=$((n_ko - n_del))
+n_del_bytes=0
+for s in "${del_sz[@]}"; do n_del_bytes=$((n_del_bytes + s)); done
+
+if (( ${#del_sz[@]} > 0 )) && [[ -z "$DIR" && -z "$SFS" ]]; then
+    # the live box must keep this kernel bootable; refuse an insane trim
+    if (( kept < FLOOR )); then
+        echo "ABORT: live --apply would keep only ${kept}/${n_ko} modules (floor ${FLOOR})." >&2
+        echo "       Something is wrong with the keep-set - nothing was deleted." >&2
+        echo "       Adjust with --floor if you really mean it." >&2
+        exit 1
+    fi
+fi
+
+if [[ "$APPLY" == 1 ]]; then
+    for rel in "${!del_sz[@]}"; do rm -f "$MTREE/$rel"; done
+    find "$MTREE" -depth -type d -empty -delete 2>/dev/null || true
+fi
+echo ">>> modules: ${n_ko} total, keeping ${kept}, deleting ${n_del} ($((n_del_bytes/1024)) KiB)"
 
 # ── phase 2: firmware (opt-in) ────────────────────────────────────────
 
