@@ -77,7 +77,10 @@ while [[ $# -gt 0 ]]; do
     shift
 done
 
-cleanup() { [[ -n "$EXTRACT" && -d "$EXTRACT" ]] && rm -rf "$EXTRACT"; }
+cleanup() {
+    [[ -n "$EXTRACT" && -d "$EXTRACT" ]] && rm -rf "$EXTRACT"
+    return 0
+}
 trap cleanup EXIT
 
 # ── resolve target tree ───────────────────────────────────────────────
